@@ -1,15 +1,67 @@
-# Vicinae Extension
+# FD Search (Vicinae Extension)
 
-Congratulations on generating your new Vicinae extension!
+Fast filesystem search for Vicinae powered by **fd** with fuzzy matching, indexing, and file-type filtering.
 
-You can install the required dependencies and run your extension in development mode like so:
+## Features
+
+- 🔎 Instant fuzzy search across indexed filesystem paths
+- ⚡ Fast indexing using `fd`
+- 📁 Open files or parent directories directly
+- 🖥️ Open a terminal in selected directories
+- 🗂️ Filter results by file type (images, documents, code, video, etc.)
+- 📋 Copy file paths or names quickly
+- 🔄 Background index updates
+
+## Requirements
+
+- Vicinae installed
+- `fd` (or `fdfind`) installed
+
+Install fd:
+
+**Arch Linux**
+```bash
+sudo pacman -S fd
+````
+
+**Debian / Ubuntu**
 
 ```bash
-npm install
-npm run dev
+sudo apt install fd-find
 ```
-If you want to build the production bundle, simply run:
+
+## Installation (Manual)
+
+Clone or copy the extension into the Vicinae extensions directory:
 
 ```bash
-npm run build
+~/.local/share/vicinae/extensions/
 ```
+
+Then restart Vicinae.
+
+## Usage
+
+1. Open Vicinae
+2. Run **FD Search**
+3. Start typing to search files instantly (First run may take a minute to index)
+4. Use the dropdown to filter file types
+5. Use actions to:
+
+   * Open files
+   * Open parent folders
+   * Open terminal in directory
+   * Copy file paths
+
+## Indexing
+
+The extension builds a filesystem index automatically on first launch
+and refreshes periodically in the background.
+
+You can rebuild the index manually using:
+
+**Rebuild Index** action.
+
+## License
+
+MIT

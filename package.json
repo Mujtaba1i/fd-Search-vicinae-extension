@@ -8,7 +8,7 @@
   "author": "Mujtaba1i",
   "contributors": [],
   "pastContributors": [],
-  "icon": "extension_icon.png",
+  "icon": "SearchIcon.png",
   "commands": [
     {
       "name": "fd-search",
