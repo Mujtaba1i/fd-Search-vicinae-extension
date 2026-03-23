@@ -1,28 +1,31 @@
-# FD Search (Vicinae Extension)
+# FD Search
 
-Fast filesystem search for Vicinae powered by **fd** with fuzzy matching, indexing, and file-type filtering.
+Fast filesystem search for Vicinae powered by `fd`, with local indexing, fuzzy matching, filters, and a live detail pane.
 
 ## Features
 
-- 🔎 Instant fuzzy search across indexed filesystem paths
-- ⚡ Fast indexing using `fd`
-- 📁 Open files or parent directories directly
-- 🖥️ Open a terminal in selected directories
-- 🗂️ Filter results by file type (images, documents, code, video, etc.)
-- 📋 Copy file paths or names quickly
-- 🔄 Background index updates
+- Fast indexed search across your configured paths
+- Exact-first ranking with fuzzy fallback for small typos and missing words
+- Path-aware search, so full paths and folder names are handled well
+- Query filters for file type, size, and modified time
+- Configurable indexed paths, exclude patterns, hidden-file indexing, and watcher paths
+- Automatic reindex on open when the index is stale
+- Watcher-triggered reindex on open when watched files or folders changed
+- Right-side preview for images and file details for everything else
+- Actions to open files, open parent folders, open a terminal, and copy paths
 
 ## Requirements
 
 - Vicinae installed
-- `fd` (or `fdfind`) installed
+- `fd` or `fdfind` installed
 
-Install fd:
+Install `fd`:
 
 **Arch Linux**
+
 ```bash
 sudo pacman -S fd
-````
+```
 
 **Debian / Ubuntu**
 
@@ -30,37 +33,124 @@ sudo pacman -S fd
 sudo apt install fd-find
 ```
 
-## Installation (Manual)
-
-Clone or copy the extension into the Vicinae extensions directory:
-
-```bash
-~/.local/share/vicinae/extensions/
-```
-
 Then restart Vicinae.
 
-## Usage
+## How Search Works
 
-1. Open Vicinae
-2. Run **FD Search**
-3. Start typing to search files instantly (First run may take a minute to index)
-4. Use the dropdown to filter file types
-5. Use actions to:
+- Exact matches rank first
+- Similar matches come next
+- Small typos are tolerated
+- Missing-word style queries are supported
+- Typing a path scopes results to that path and its contents
 
-   * Open files
-   * Open parent folders
-   * Open terminal in directory
-   * Copy file paths
+Results appear progressively while searching, so you can start seeing matches before the full ranking pass finishes.
 
-## Indexing
 
-The extension builds a filesystem index automatically on first launch
-and refreshes periodically in the background.
+Wildcard search:
 
-You can rebuild the index manually using:
+```text
+*.mp3
+*.png
+```
 
-**Rebuild Index** action.
+Type filter:
+
+```text
+type:pdf
+type:folder
+type:image
+```
+
+Time filter:
+
+```text
+since:30m
+since:12h
+since:7d
+```
+
+Size filter:
+
+```text
+size:10mb
+size:>500kb
+size:<2gb
+```
+
+You can combine filters:
+
+
+
+You can also exclude words with `-`:
+
+```text
+react -node_modules
+```
+
+## Settings
+
+The command settings currently support:
+
+- `Reindex After (Minutes)`
+  Rebuilds the index when you open the extension and the current index is older than this value.
+  Clamped between `0.5` and `20`.
+
+- `Max Results`
+  Maximum number of results shown.
+  Clamped between `10` and `100`.
+
+- `Indexed Paths`
+  Semicolon-separated paths to index.
+  Default: `/home`
+
+- `Exclude Patterns`
+  Semicolon-separated `fd` exclude patterns.
+  Default:
+
+```text
+.git;node_modules;dist;build;.cache;.venv;venv;__pycache__
+```
+
+- `Hidden Files`
+  Optional checkbox to include hidden files and folders.
+
+- `Watcher Paths`
+  Semicolon-separated files or folders that can trigger a reindex when changed.
+
+## Important Notes
+
+
+- Hidden files are skipped by default
+- Entering `/` as an indexed path can make indexing very slow and very large
+- Enabling hidden-file indexing can greatly increase index size and may slow down or crash the extension on large systems
+- Watcher paths are checked when the command is opened, not as a permanent always-running background watcher
+
+## Indexing Behavior
+
+- If no index exists, the extension builds one on first open
+- If an index exists and is still fresh, it is used immediately
+- If the index is older than the configured reindex time, a refresh starts when you open the extension
+- If watcher paths changed, opening the extension can trigger a refresh even before the normal time threshold
+- Rebuilds write to a temporary file first, then replace the active index when complete
+
+## UI
+
+- The left side shows ranked search results
+- The right side shows:
+  - image preview for supported image files
+  - metadata such as type, size, created time, modified time, name, parent, and full path for other items
+
+## Actions
+
+Available actions include:
+
+- Open
+- Open Parent Folder
+- Open Terminal Here
+- Copy Full Path
+- Copy Name
+- Copy Parent Directory
+- Rebuild Index
 
 ## License
 
