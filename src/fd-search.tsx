@@ -20,6 +20,7 @@ import { createHash } from "crypto";
 import readline from "readline";
 import path from "path";
 import { pathToFileURL } from "url";
+import { serialize, deserialize } from "v8";
 
 const execAsync = promisify(exec);
 
@@ -118,7 +119,43 @@ const MAX_REINDEX_AFTER_MINUTES = 20;
 const INDEX_REFRESH_POLL_MS = 3000;
 const CACHE_LOAD_YIELD_EVERY = 2000;
 const SEARCH_CHUNK_SIZE = 1500;
-const PARTIAL_RESULT_UPDATE_EVERY = 3000;
+const SEARCH_CACHE_FILE = path.join(environment.supportPath, "fd_search_cache.bin");
+const SEARCH_CACHE_VERSION = 1;
+
+async function readSearchCache(source: IndexSource): Promise<CachedIndexData | null> {
+  try {
+    const saved = deserialize(await fs.promises.readFile(SEARCH_CACHE_FILE));
+    if (
+      saved.version === SEARCH_CACHE_VERSION &&
+      saved.fingerprint === getIndexFingerprint(source) &&
+      saved.size === (await fs.promises.stat(source.path)).size &&
+      Array.isArray(saved.data?.entries) && saved.data?.prefixIndex instanceof Map
+    ) {
+      return saved.data;
+    }
+  } catch {
+    // A missing or outdated cache can be rebuilt from the index.
+  }
+  return null;
+}
+
+async function writeSearchCache(source: IndexSource, data: CachedIndexData) {
+  const temporaryPath = `${SEARCH_CACHE_FILE}.${process.pid}.tmp`;
+  try {
+    const size = (await fs.promises.stat(source.path)).size;
+    await fs.promises.writeFile(temporaryPath, serialize({
+      version: SEARCH_CACHE_VERSION,
+      fingerprint: getIndexFingerprint(source),
+      size,
+      data,
+    }));
+    await fs.promises.rename(temporaryPath, SEARCH_CACHE_FILE);
+  } catch {
+    // Saving this cache is optional; searching still works without it.
+  } finally {
+    await fs.promises.unlink(temporaryPath).catch(() => {});
+  }
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -294,11 +331,11 @@ function getFileIcon(filePath: string, isDirectory: boolean): Icon {
   }
 
   if ([".pdf", ".doc", ".docx", ".txt", ".md", ".rtf"].includes(ext)) {
-    return Icon.Document;
+    return Icon.BlankDocument;
   }
 
   if ([".xls", ".xlsx", ".csv"].includes(ext)) {
-    return Icon.Spreadsheet;
+    return Icon.AppWindowGrid3x3;
   }
 
   if ([".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"].includes(ext)) {
@@ -317,7 +354,7 @@ function getFileIcon(filePath: string, isDirectory: boolean): Icon {
     return Icon.Terminal;
   }
 
-  return Icon.Document;
+  return Icon.BlankDocument;
 }
 
 function fuzzyMatch(pattern: string, text: string): { matches: boolean; score: number } {
@@ -728,10 +765,21 @@ function getScopedResultScore(entry: IndexEntry, pathScope: string): number {
   return 3500 - depthDelta * 10;
 }
 
-function getCachedMatchScore(searchQuery: string, entry: CachedIndexEntry): number {
+function prepareSearchQuery(searchQuery: string) {
   const queryLower = searchQuery.toLowerCase();
   const normalizedQuery = normalizeForSearch(searchQuery);
   const queryTokens = normalizedQuery.split(" ").filter(Boolean);
+  const typoLimit = normalizedQuery.length >= 7 ? 2 : 1;
+  const tokenDistances = new Map<string, number | null>();
+
+  return { queryLower, normalizedQuery, queryTokens, typoLimit, tokenDistances };
+}
+
+function getCachedMatchScore(
+  query: ReturnType<typeof prepareSearchQuery>,
+  entry: CachedIndexEntry,
+): number {
+  const { queryLower, normalizedQuery, queryTokens, typoLimit, tokenDistances } = query;
 
   if (!normalizedQuery) {
     return 0;
@@ -777,10 +825,16 @@ function getCachedMatchScore(searchQuery: string, entry: CachedIndexEntry): numb
     return 300 + pathFuzzy.score;
   }
 
-  const typoLimit = normalizedQuery.length >= 7 ? 2 : 1;
   if (normalizedQuery.length >= 4) {
     for (const token of entry.normalizedTokens) {
-      const distance = getEditDistanceWithinLimit(normalizedQuery, token, typoLimit);
+      if (Math.abs(normalizedQuery.length - token.length) > typoLimit) {
+        continue;
+      }
+      let distance = tokenDistances.get(token);
+      if (distance === undefined) {
+        distance = getEditDistanceWithinLimit(normalizedQuery, token, typoLimit);
+        tokenDistances.set(token, distance);
+      }
       if (distance !== null) {
         return distance === 0 ? 1600 : 900 - distance * 100;
       }
@@ -1038,6 +1092,7 @@ export default function Command() {
   const [indexedCount, setIndexedCount] = useState<number | null>(null);
   const [selectedItemPath, setSelectedItemPath] = useState<string>("");
   const [selectedItemDetails, setSelectedItemDetails] = useState<SelectedItemDetails | null>(null);
+  const [resultQuery, setResultQuery] = useState("");
 
   const currentSearchAbort = useRef<AbortController | null>(null);
   const indexingProcess = useRef<ReturnType<typeof spawn> | null>(null);
@@ -1205,11 +1260,16 @@ export default function Command() {
 
     cachedIndexFingerprintRef.current = fingerprint;
     cachedIndexPromiseRef.current = (async () => {
+      const savedCache = await readSearchCache(source);
+      if (savedCache) {
+        cachedIndexRef.current = savedCache;
+        cachedIndexPromiseRef.current = null;
+        return savedCache;
+      }
       const cachedIndexData: CachedIndexData = {
         entries: [],
         prefixIndex: new Map<string, number[]>(),
       };
-      cachedIndexRef.current = cachedIndexData;
       const fileStream = createReadStream(source.path, { encoding: "utf8" });
       const rl = readline.createInterface({
         input: fileStream,
@@ -1230,7 +1290,7 @@ export default function Command() {
           cachedIndexData.entries.push(cachedEntry);
 
           const prefixKeys = new Set<string>();
-          const tokens = cachedEntry.normalizedPath.split(" ").filter(Boolean);
+          const tokens = cachedEntry.normalizedTokens;
 
           for (const token of tokens) {
             const maxPrefixLength = Math.min(3, token.length);
@@ -1253,13 +1313,8 @@ export default function Command() {
             await new Promise<void>((resolve) => setImmediate(resolve));
           }
         }
-        cachedIndexPromiseRef.current = null;
-
-        if (latestQueryRef.current.trim() || latestFilterTypeRef.current !== "all") {
-          setImmediate(() => {
-            void runSearch(latestQueryRef.current);
-          });
-        }
+        cachedIndexRef.current = cachedIndexData;
+        void writeSearchCache(source, cachedIndexData);
 
         return cachedIndexData;
       } finally {
@@ -1298,7 +1353,20 @@ export default function Command() {
     setHasIndex(true);
     indexFingerprintRef.current = getIndexFingerprint(source);
     setLoading(true);
-    void loadCachedIndex(source);
+    let cachedIndexData: CachedIndexData;
+    try {
+      cachedIndexData = await loadCachedIndex(source);
+    } catch (error) {
+      if (searchGeneration === searchGenerationRef.current && !abortSignal.aborted) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Failed to load search index",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        setLoading(false);
+      }
+      return;
+    }
     const {
       pathScope,
       searchText,
@@ -1319,17 +1387,12 @@ export default function Command() {
       archives: [".zip", ".tar", ".gz", ".7z", ".rar", ".bz2"],
     };
 
-    const cachedIndexData = cachedIndexRef.current;
-    if (!cachedIndexData) {
-      setLoading(true);
-      return;
-    }
-
     if (searchGeneration !== searchGenerationRef.current || abortSignal.aborted) {
       return;
     }
 
     const candidateEntries = getCandidateEntries(cachedIndexData, pathScope, searchText);
+    const preparedQuery = prepareSearchQuery(searchText);
 
     const topMatches: ScoredResult[] = [];
 
@@ -1376,10 +1439,10 @@ export default function Command() {
       } else if (wildcardPattern) {
         if (wildcardPattern.test(cachedEntry.path) || wildcardPattern.test(cachedEntry.leafName)) {
           matches = true;
-          score = cachedEntry.path === searchText ? 2000 : getCachedMatchScore(searchText, cachedEntry);
+          score = cachedEntry.path === searchText ? 2000 : getCachedMatchScore(preparedQuery, cachedEntry);
         }
       } else {
-        score = getCachedMatchScore(searchText, cachedEntry);
+        score = getCachedMatchScore(preparedQuery, cachedEntry);
         if (score > 0) {
           matches = true;
         }
@@ -1409,20 +1472,6 @@ export default function Command() {
         processEntry(cachedEntry);
         processedCount += 1;
 
-        if (processedCount % PARTIAL_RESULT_UPDATE_EVERY === 0) {
-          if (searchGeneration === searchGenerationRef.current && !abortSignal.aborted) {
-            setResults(
-              topMatches.map((match) => ({
-                path: match.entry.path,
-                isDirectory: match.entry.isDirectory,
-                size: match.entry.size,
-                mtimeMs: match.entry.mtimeMs,
-                extension: match.entry.extension,
-              })),
-            );
-          }
-        }
-
         if (processedCount % SEARCH_CHUNK_SIZE === 0) {
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
@@ -1444,6 +1493,9 @@ export default function Command() {
         return;
       }
 
+      const queryKey = JSON.stringify([q, filterType]);
+      setResultQuery(queryKey);
+      setSelectedItemPath(finalResults[0]?.path ?? "");
       setResults(finalResults);
       setLoading(Boolean(cachedIndexPromiseRef.current));
     } catch (e) {
@@ -1784,6 +1836,7 @@ export default function Command() {
 
   useEffect(() => {
     if (!query.trim() && filterType === "all") {
+      currentSearchAbort.current?.abort();
       setResults([]);
       setLoading(false);
       return;
@@ -1841,7 +1894,7 @@ export default function Command() {
       searchBarPlaceholder={searchBarPlaceholder}
       navigationTitle={navigationTitle}
       onSearchTextChange={setQuery}
-      onSelectionChange={setSelectedItemPath}
+      onSelectionChange={(id) => setSelectedItemPath((JSON.parse(id) as [string, string])[1])}
       searchBarAccessory={
         <List.Dropdown tooltip="Filter by File Type" value={filterType} onChange={setFilterType}>
           <List.Dropdown.Item title="All Files" value="all" />
@@ -1853,7 +1906,7 @@ export default function Command() {
           <List.Dropdown.Item title="Archives" value="archives" />
         </List.Dropdown>
       }
-      throttle
+      throttle={false}
     >
       {indexStatus === "building" && !hasIndex && (
         <List.EmptyView
@@ -1952,8 +2005,8 @@ export default function Command() {
 
         return (
           <List.Item
-            key={item.path}
-            id={item.path}
+            key={JSON.stringify([resultQuery, item.path])}
+            id={JSON.stringify([resultQuery, item.path])}
             title={filename}
             subtitle={parentDir}
             icon={icon}
