@@ -8,6 +8,7 @@ import {
   environment,
   getPreferenceValues,
   LaunchType,
+  closeMainWindow,
 } from "@vicinae/api";
 import { useState, useEffect, useRef } from "react";
 import { spawn } from "child_process";
@@ -119,6 +120,55 @@ const INDEX_REFRESH_POLL_MS = 3000;
 const CACHE_LOAD_YIELD_EVERY = 2000;
 const SEARCH_CHUNK_SIZE = 1500;
 const PARTIAL_RESULT_UPDATE_EVERY = 3000;
+
+async function openAndClose(path: string) {
+  const reportFailure = async (error: unknown) => {
+    console.error("Failed to open:", path, error);
+    await showToast({
+      style: Toast.Style.Failure,
+      title: "Failed to open file or folder",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  };
+
+  try {
+    await fs.promises.access(path);
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("xdg-open", [path], {
+        detached: true,
+        stdio: "ignore",
+      });
+
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code !== 0) {
+          void reportFailure(
+            new Error(`xdg-open failed (${signal ?? `exit code ${code}`})`),
+          ).catch(console.error);
+        }
+      });
+      child.once("spawn", () => {
+        // Do not wait for the opened application to exit before closing Vicinae.
+        child.unref();
+        resolve();
+      });
+    });
+  } catch (error) {
+    await reportFailure(error);
+    return;
+  }
+
+  try {
+    await closeMainWindow();
+  } catch (error) {
+    console.error("Failed to close Vicinae:", error);
+    await showToast({
+      style: Toast.Style.Failure,
+      title: "Could not close Vicinae",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -294,11 +344,11 @@ function getFileIcon(filePath: string, isDirectory: boolean): Icon {
   }
 
   if ([".pdf", ".doc", ".docx", ".txt", ".md", ".rtf"].includes(ext)) {
-    return Icon.Document;
+    return Icon.BlankDocument;
   }
 
   if ([".xls", ".xlsx", ".csv"].includes(ext)) {
-    return Icon.Spreadsheet;
+    return Icon.AppWindowGrid3x3;
   }
 
   if ([".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"].includes(ext)) {
@@ -317,7 +367,7 @@ function getFileIcon(filePath: string, isDirectory: boolean): Icon {
     return Icon.Terminal;
   }
 
-  return Icon.Document;
+  return Icon.BlankDocument;
 }
 
 function fuzzyMatch(pattern: string, text: string): { matches: boolean; score: number } {
@@ -1978,11 +2028,16 @@ export default function Command() {
             actions={
               <ActionPanel>
                 <ActionPanel.Section title="File Actions">
-                  <Action.Open title="Open" target={item.path} />
-                  <Action.Open
+                  <Action
+                    title="Open"
+                    icon={item.isDirectory ? Icon.Folder : Icon.BlankDocument}
+                    onAction={() => void openAndClose(item.path)}
+                  />
+                  <Action
                     title="Open Parent Folder"
-                    target={parentDir}
+                    icon={Icon.Folder}
                     shortcut={{ modifiers: ["cmd", "shift"], key: "o" }}
+                    onAction={() => void openAndClose(parentDir)}
                   />
                   {item.isDirectory && (
                     <Action
